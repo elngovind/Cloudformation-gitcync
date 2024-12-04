@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2, ALB, and ASG configuration'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+  InstanceType:
+    Type: String
+  MinSize:
+    Type: Number
+  MaxSize:
+    Type: Number
+  DesiredCapacity:
+    Type: Number
+
+Resources:
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !ImportValue PublicSubnet1
+        - !ImportValue PublicSubnet2
+      SecurityGroups:
+        - !ImportValue ALBSecurityGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds: 
+          - !ImportValue EC2SecurityGroup
+        IamInstanceProfile:
+          Name: !ImportValue EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !ImportValue PrivateAppSubnet1
+        - !ImportValue PrivateAppSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+

@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 instances with Application Load Balancer and Auto Scaling Group'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name (dev/prod)
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+
+  ImageId:
+    Description: Amazon Linux 2 AMI ID
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  MinSize:
+    Description: Minimum number of instances in ASG
+    Type: Number
+    Default: 1
+
+  MaxSize:
+    Description: Maximum number of instances in ASG
+    Type: Number
+    Default: 4
+
+  DesiredCapacity:
+    Description: Desired number of instances in ASG
+    Type: Number
+    Default: 2
+
+  SSHKeyName:
+    Description: SSH Key Name
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-alb
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+      Subnets:
+        - Fn::ImportValue: !Sub ${EnvironmentName}-PublicSubnet1
+        - Fn::ImportValue: !Sub ${EnvironmentName}-PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub ${EnvironmentName}-VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '20'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-tg
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-launch-template
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref SSHKeyName
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<h1>Hello from ${EnvironmentName} environment</h1>" > /var/www/html/index.html
+            echo "<h2>Instance ID: $(curl -s http://169.254.169.254/latest/meta-data/instance-id)</h2>" >> /var/www/html/index.html
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${EnvironmentName}-instance
+              - Key: Environment
+                Value: !Ref EnvironmentName
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${EnvironmentName}-asg
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${EnvironmentName}-PrivateSubnet1
+        - Fn::ImportValue: !Sub ${EnvironmentName}-PrivateSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-asg
+          PropagateAtLaunch: true
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId:
+        Fn::ImportValue: !Sub ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb-sg
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId:
+        Fn::ImportValue: !Sub ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0  # Note: In production, restrict to specific IP ranges
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ec2-sg
+
+  # Auto Scaling Policies
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+Outputs:
+  ALBDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBDNSName
+
+  AutoScalingGroupName:
+    Description: Name of Auto Scaling Group
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-ASGName
+
+  ALBTargetGroupArn:
+    Description: ARN of Target Group
+    Value: !Ref ALBTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-TargetGroupArn
+
+  EC2SecurityGroupId:
+    Description: Security Group ID for EC2 instances
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2SecurityGroupId
+

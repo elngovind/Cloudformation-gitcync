@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Main template for 3-tier architecture deployment'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+
+  # VPC Parameters
+  VpcCidr:
+    Description: CIDR block for VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  # EC2 Parameters
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  MinSize:
+    Description: Minimum number of instances in ASG
+    Type: Number
+    Default: 1
+
+  MaxSize:
+    Description: Maximum number of instances in ASG
+    Type: Number
+    Default: 4
+
+  DesiredCapacity:
+    Description: Desired number of instances in ASG
+    Type: Number
+    Default: 2
+
+  # S3 Parameters
+  RetentionDays:
+    Description: Number of days to retain objects before moving to Standard-IA
+    Type: Number
+    Default: 30
+    MinValue: 30
+
+  LogRetentionDays:
+    Description: Number of days to retain access logs
+    Type: Number
+    Default: 90
+
+Conditions:
+  IsProduction: !Equals [!Ref EnvironmentName, 'prod']
+
+Resources:
+  # VPC Stack
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/network/vpc.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcCidr: !Ref VpcCidr
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # IAM and Security Stack
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: templates/security/iam-security.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        S3BucketName: !GetAtt StorageStack.Outputs.ApplicationBucketName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # S3 Storage Stack
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: templates/storage/s3.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        RetentionDays: !Ref RetentionDays
+        LogRetentionDays: !If [IsProduction, 365, !Ref LogRetentionDays]
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Compute Stack (EC2, ALB, ASG)
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - NetworkStack
+      - SecurityStack
+    Properties:
+      TemplateURL: templates/compute/ec2-alb-asg.yaml
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        InstanceType: !If [IsProduction, 't3.small', !Ref InstanceType]
+        MinSize: !If [IsProduction, 2, !Ref MinSize]
+        MaxSize: !If [IsProduction, 6, !Ref MaxSize]
+        DesiredCapacity: !If [IsProduction, 4, !Ref DesiredCapacity]
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !GetAtt NetworkStack.Outputs.VpcId
+
+  ApplicationURL:
+    Description: URL of the application
+    Value: !GetAtt ComputeStack.Outputs.ALBDNSName
+
+  S3BucketName:
+    Description: Name of the application S3 bucket
+    Value: !GetAtt StorageStack.Outputs.ApplicationBucketName
+
+  AutoScalingGroupName:
+    Description: Name of Auto Scaling Group
+    Value: !GetAtt ComputeStack.Outputs.AutoScalingGroupName
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcCidr
+      - Label:
+          default: "Compute Configuration"
+        Parameters:
+          - InstanceType
+          - MinSize
+          - MaxSize
+          - DesiredCapacity
+      - Label:
+          default: "Storage Configuration"
+        Parameters:
+          - RetentionDays
+          - LogRetentionDays
+    ParameterLabels:
+      EnvironmentName:
+        default: "Environment Name"
+      VpcCidr:
+        default: "VPC CIDR Block"
+      InstanceType:
+        default: "EC2 Instance Type"
+

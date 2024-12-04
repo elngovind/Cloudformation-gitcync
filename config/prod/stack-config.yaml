@@ -1,0 +1,11 @@
+Parameters:
+  EnvironmentName: prod
+  VpcCidr: 10.1.0.0/16
+  InstanceType: t3.small
+  MinSize: 2
+  MaxSize: 4
+  DesiredCapacity: 2
+Tags:
+  Environment: Production
+  Owner: DevOps
+

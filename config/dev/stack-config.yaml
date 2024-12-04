@@ -1,0 +1,11 @@
+Parameters:
+  EnvironmentName: dev
+  VpcCidr: 10.0.0.0/16
+  InstanceType: t3.micro
+  MinSize: 1
+  MaxSize: 2
+  DesiredCapacity: 1
+Tags:
+  Environment: Development
+  Owner: DevOps
+

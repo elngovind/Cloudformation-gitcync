@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM roles and security configurations for 3-tier architecture'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name (dev/prod)
+    Type: String
+    AllowedValues:
+      - dev
+      - prod
+
+  S3BucketName:
+    Description: Name of the S3 bucket for application assets
+    Type: String
+
+Resources:
+  # EC2 Instance Role
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # EC2 Instance Profile
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${EnvironmentName}-ec2-instance-profile
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # S3 Access Policy for EC2
+  S3AccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-s3-access-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${S3BucketName}
+              - !Sub arn:aws:s3:::${S3BucketName}/*
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # CloudWatch Logs Policy
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-cloudwatch-logs-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogStreams
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${EnvironmentName}/*
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # Auto Scaling Service Role
+  AutoScalingServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-autoscaling-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AutoScalingServiceRolePolicy
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # KMS Key for Encryption
+  EncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub KMS key for ${EnvironmentName} environment
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow EC2 Role to use the key
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EC2InstanceRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: '*'
+
+  # KMS Key Alias
+  EncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${EnvironmentName}-key
+      TargetKeyId: !Ref EncryptionKey
+
+  # Security Group for Application Load Balancer
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: 
+        Fn::ImportValue: !Sub ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb-sg
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Security Group for EC2 Instances
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId:
+        Fn::ImportValue: !Sub ${EnvironmentName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ec2-sg
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Backup Role
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-backup-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+        - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+
+Outputs:
+  EC2InstanceRoleArn:
+    Description: ARN of EC2 Instance Role
+    Value: !GetAtt EC2InstanceRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2RoleArn
+
+  EC2InstanceProfileArn:
+    Description: ARN of EC2 Instance Profile
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2ProfileArn
+
+  KMSKeyId:
+    Description: ID of KMS Key
+    Value: !Ref EncryptionKey
+    Export:
+      Name: !Sub ${EnvironmentName}-KMSKeyId
+
+  ALBSecurityGroupId:
+    Description: Security Group ID for ALB
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-ALBSecurityGroupId
+
+  EC2SecurityGroupId:
+    Description: Security Group ID for EC2
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2SecurityGroupId
+
+  BackupRoleArn:
+    Description: ARN of Backup Role
+    Value: !GetAtt BackupRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-BackupRoleArn
+
